@@ -1,11 +1,13 @@
 package ssh
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net"
 	"os"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -23,44 +25,23 @@ type forwardMsg struct {
 	OriginatorPort uint32
 }
 
-// Server represents a listening ssh server
-type Server struct {
-	Config   *ssh.ServerConfig
-	listener net.Listener
+func (f *forwardMsg) To() string {
+	return fmt.Sprintf("%s:%d", f.Addr, f.Rport)
 }
 
-// DefaultConfig generates a default ssh.ServerConfig
-func DefaultConfig() (*ssh.ServerConfig, error) {
-	config := &ssh.ServerConfig{
-		// Remove to disable password auth.
-		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
-			return nil, nil
-		},
+type Dialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
 
-		// Remove to disable public key auth.
-		PublicKeyCallback: func(c ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
-			return &ssh.Permissions{
-				// Record the public key used for authentication.
-				Extensions: map[string]string{
-					"pubkey-fp": ssh.FingerprintSHA256(pubKey),
-				},
-			}, nil
-		},
-	}
+// Server represents a listening ssh server
+type Server struct {
+	// Config is the ssh serverconfig
+	Config *ssh.ServerConfig
 
-	privateBytes, err := ioutil.ReadFile("id_rsa")
-	if err != nil {
-		return nil, fmt.Errorf("Failed to load private key: %s", err)
-	}
+	// Dialer provides means to dial forwards
+	Dialer Dialer
 
-	private, err := ssh.ParsePrivateKey(privateBytes)
-	if err != nil {
-		return nil, fmt.Errorf("Failed to parse private key: %s", err)
-	}
-
-	config.AddHostKey(private)
-
-	return config, nil
+	listener net.Listener
 }
 
 // Listen will listen and accept ssh connections
@@ -108,30 +89,39 @@ func (s *Server) accept(c net.Conn) {
 			continue
 		}
 
-		forwardInfo := &forwardMsg{}
-		err := ssh.Unmarshal(newChannel.ExtraData(), forwardInfo)
+		forwardInfo := forwardMsg{}
+		err := ssh.Unmarshal(newChannel.ExtraData(), &forwardInfo)
 		if err != nil {
 			logger.Printf("unable to unmarshal forward information: %s", err)
 			continue
 		}
-		logger.Printf("extra data: %+v, unmarshalled: %+v", newChannel.ExtraData(), forwardInfo)
+
+		logger.Printf("accepting forward to %s:%d", forwardInfo.Addr, forwardInfo.Rport)
 
 		channel, requests, err := newChannel.Accept()
 		if err != nil {
 			logger.Print("Could not accept channel: ", err)
 		}
 
-		// Sessions have out-of-band requests such as "shell",
-		// "pty-req" and "env".  Here we handle only the
-		// "shell" request.
-		go func(in <-chan *ssh.Request) {
-			for req := range in {
-				logger.Printf("channel request: %+v", req)
-				req.Reply(req.Type == "shell", nil)
-			}
-		}(requests)
-		channel.Write([]byte("Hjerteligt velkommen\n\r"))
+		go ssh.DiscardRequests(requests)
+		go s.connectForward(channel, forwardInfo)
 	}
 
 	logger.Print("client went away ", conn.RemoteAddr())
+}
+
+func (s *Server) connectForward(c ssh.Channel, forwardInfo forwardMsg) {
+	ctx, cancelTimeout := context.WithTimeout(context.Background(), 25*time.Second)
+	conn, err := s.Dialer.DialContext(ctx, "tcp", forwardInfo.To())
+
+	cancelTimeout()
+	if err != nil {
+		logger.Printf("unable to dial %s: %s", forwardInfo.To(), err)
+		c.Stderr().Write([]byte(fmt.Sprintf("unable to dial %s: %s", forwardInfo.To(), err)))
+		c.Close()
+	}
+
+	// pass traffic
+	go io.Copy(conn, c)
+	go io.Copy(c, conn)
 }
