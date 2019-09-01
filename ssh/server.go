@@ -16,6 +16,13 @@ func init() {
 	logger = log.New(os.Stderr, "[ssh] ", log.Flags())
 }
 
+type forwardMsg struct {
+	Addr           string
+	Rport          uint32
+	OriginatorAddr string
+	OriginatorPort uint32
+}
+
 // Server represents a listening ssh server
 type Server struct {
 	Config   *ssh.ServerConfig
@@ -76,12 +83,22 @@ func (s *Server) accept(c net.Conn) {
 	conn, chans, reqs, err := ssh.NewServerConn(c, s.Config)
 	if err != nil {
 		logger.Print("failed to handshake: ", err)
+		return
 	}
 
 	logger.Printf("accepted session from %s", conn.RemoteAddr())
 
 	// The incoming Request channel must be serviced.
-	go ssh.DiscardRequests(reqs)
+	go func(reqs <-chan *ssh.Request) {
+		for req := range reqs {
+			if req.Type == "keepalive@openssh.com" {
+				req.Reply(true, nil)
+				continue
+			}
+			req.Reply(false, nil)
+
+		}
+	}(reqs)
 
 	// Service the incoming Channel channel.
 	for newChannel := range chans {
@@ -90,6 +107,14 @@ func (s *Server) accept(c net.Conn) {
 			newChannel.Reject(ssh.UnknownChannelType, newChannel.ChannelType())
 			continue
 		}
+
+		forwardInfo := &forwardMsg{}
+		err := ssh.Unmarshal(newChannel.ExtraData(), forwardInfo)
+		if err != nil {
+			logger.Printf("unable to unmarshal forward information: %s", err)
+			continue
+		}
+		logger.Printf("extra data: %+v, unmarshalled: %+v", newChannel.ExtraData(), forwardInfo)
 
 		channel, requests, err := newChannel.Accept()
 		if err != nil {
@@ -101,6 +126,7 @@ func (s *Server) accept(c net.Conn) {
 		// "shell" request.
 		go func(in <-chan *ssh.Request) {
 			for req := range in {
+				logger.Printf("channel request: %+v", req)
 				req.Reply(req.Type == "shell", nil)
 			}
 		}(requests)
