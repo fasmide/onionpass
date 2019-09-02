@@ -1,0 +1,11 @@
+[Unit]
+Description=onionpass
+After=network.target
+
+[Service]
+ExecStart=/root/schttp -sshPort 22
+
+Environment=ALL_PROXY=socks5://127.0.0.1:9050
+
+[Install]
+WantedBy=multi-user.target
