@@ -29,17 +29,13 @@ func (f *forwardMsg) To() string {
 	return fmt.Sprintf("%s:%d", f.Addr, f.Rport)
 }
 
-type Dialer interface {
-	DialContext(ctx context.Context, network, address string) (net.Conn, error)
-}
-
 // Server represents a listening ssh server
 type Server struct {
 	// Config is the ssh serverconfig
 	Config *ssh.ServerConfig
 
-	// Dialer provides means to dial forwards
-	Dialer Dialer
+	// Dial provides means to dial forwards
+	Dial func(ctx context.Context, network, address string) (net.Conn, error)
 
 	listener net.Listener
 }
@@ -82,29 +78,32 @@ func (s *Server) accept(c net.Conn) {
 	}(reqs)
 
 	// Service the incoming Channel channel.
-	for newChannel := range chans {
+	for channelRequest := range chans {
 
-		if newChannel.ChannelType() != "direct-tcpip" {
-			newChannel.Reject(ssh.UnknownChannelType, newChannel.ChannelType())
+		if channelRequest.ChannelType() != "direct-tcpip" {
+			channelRequest.Reject(ssh.Prohibited, fmt.Sprintf("no %s allowed, only direct-tcpip", channelRequest.ChannelType()))
 			continue
 		}
 
 		forwardInfo := forwardMsg{}
-		err := ssh.Unmarshal(newChannel.ExtraData(), &forwardInfo)
+		err := ssh.Unmarshal(channelRequest.ExtraData(), &forwardInfo)
 		if err != nil {
 			logger.Printf("unable to unmarshal forward information: %s", err)
+			channelRequest.Reject(ssh.UnknownChannelType, "failed to parse forward information")
 			continue
 		}
 
 		logger.Printf("accepting forward to %s:%d", forwardInfo.Addr, forwardInfo.Rport)
 
-		channel, requests, err := newChannel.Accept()
+		channel, requests, err := channelRequest.Accept()
 		if err != nil {
-			logger.Print("Could not accept channel: ", err)
+			logger.Print("could not accept forward channel: ", err)
+			continue
 		}
 
 		go ssh.DiscardRequests(requests)
 		go s.connectForward(channel, forwardInfo)
+
 	}
 
 	logger.Print("client went away ", conn.RemoteAddr())
@@ -112,16 +111,22 @@ func (s *Server) accept(c net.Conn) {
 
 func (s *Server) connectForward(c ssh.Channel, forwardInfo forwardMsg) {
 	ctx, cancelTimeout := context.WithTimeout(context.Background(), 25*time.Second)
-	conn, err := s.Dialer.DialContext(ctx, "tcp", forwardInfo.To())
-
+	conn, err := s.Dial(ctx, "tcp", forwardInfo.To())
 	cancelTimeout()
 	if err != nil {
 		logger.Printf("unable to dial %s: %s", forwardInfo.To(), err)
-		c.Stderr().Write([]byte(fmt.Sprintf("unable to dial %s: %s", forwardInfo.To(), err)))
+		fmt.Fprintf(c.Stderr(), "unable to dial %s: %s", forwardInfo.To(), err)
 		c.Close()
+		return
 	}
 
-	// pass traffic
-	go io.Copy(conn, c)
-	go io.Copy(c, conn)
+	// pass traffic in both directions - close channel when io.Copy returns
+	go func() {
+		io.Copy(conn, c)
+		c.Close()
+	}()
+	func() {
+		io.Copy(c, conn)
+		c.Close()
+	}()
 }

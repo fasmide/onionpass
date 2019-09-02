@@ -24,12 +24,6 @@ func main() {
 		log.Fatalf("cannot listen for ssh connections: %s", err)
 	}
 
-	// sshServer also needs a dialer to dial forwards requests
-	dialer, err := proxy.SOCKS5("tcp", "127.0.0.1:9050", nil, proxy.Direct)
-	if err != nil {
-		log.Fatalf("cannot initiate proxy: %s", err)
-	}
-
-	sshServer := ssh.Server{Config: sshConfig, Dialer: dialer}
+	sshServer := ssh.Server{Config: sshConfig, Dial: proxy.Dial}
 	sshServer.Listen(listener)
 }
