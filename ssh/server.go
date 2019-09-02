@@ -18,17 +18,6 @@ func init() {
 	logger = log.New(os.Stderr, "[ssh] ", log.Flags())
 }
 
-type forwardMsg struct {
-	Addr           string
-	Rport          uint32
-	OriginatorAddr string
-	OriginatorPort uint32
-}
-
-func (f *forwardMsg) To() string {
-	return fmt.Sprintf("%s:%d", f.Addr, f.Rport)
-}
-
 // Server represents a listening ssh server
 type Server struct {
 	// Config is the ssh serverconfig
@@ -54,14 +43,20 @@ func (s *Server) Listen(l net.Listener) {
 }
 
 func (s *Server) accept(c net.Conn) {
+	// auth timeout
+	// only give people 10 seconds to ssh handshake and authenticate themselves
+	timer := time.AfterFunc(10*time.Second, func() {
+		c.Close()
+	})
 
-	// Before use, a handshake must be performed on the incoming
-	// net.Conn.
+	// ssh handshake and auth
 	conn, chans, reqs, err := ssh.NewServerConn(c, s.Config)
 	if err != nil {
 		logger.Print("failed to handshake: ", err)
 		return
 	}
+
+	timer.Stop()
 
 	logger.Printf("accepted session from %s", conn.RemoteAddr())
 
@@ -93,8 +88,26 @@ func (s *Server) accept(c net.Conn) {
 			continue
 		}
 
-		logger.Printf("accepting forward to %s:%d", forwardInfo.Addr, forwardInfo.Rport)
+		if !forwardInfo.IsOnion() {
+			channelRequest.Reject(ssh.Prohibited, "onionpass only passes traffic to .onion services")
+			continue
+		}
 
+		// it seems channel.Stderr() is somehow broken between golang and the regular ssh client
+		// so to give a meaning full error response to users . we connect to the forward endpoint
+		// before accepting the channel - if this connection fails we reject the channel request
+		// with a meaningfull message
+		ctx, cancelTimeout := context.WithTimeout(context.Background(), 25*time.Second)
+		forwardConnection, err := s.Dial(ctx, "tcp", forwardInfo.To())
+		cancelTimeout()
+		if err != nil {
+			logger.Printf("unable to dial %s: %s", forwardInfo.To(), err)
+			channelRequest.Reject(ssh.ConnectionFailed, fmt.Sprintf("failed to dial %s: %s", forwardInfo.To(), err))
+			continue
+		}
+
+		// Accept channel from ssh client
+		logger.Printf("accepting forward to %s:%d", forwardInfo.Addr, forwardInfo.Rport)
 		channel, requests, err := channelRequest.Accept()
 		if err != nil {
 			logger.Print("could not accept forward channel: ", err)
@@ -102,31 +115,17 @@ func (s *Server) accept(c net.Conn) {
 		}
 
 		go ssh.DiscardRequests(requests)
-		go s.connectForward(channel, forwardInfo)
 
+		// pass traffic in both directions - close channel when io.Copy returns
+		go func() {
+			io.Copy(forwardConnection, channel)
+			channel.Close()
+		}()
+		go func() {
+			io.Copy(channel, forwardConnection)
+			channel.Close()
+		}()
 	}
 
 	logger.Print("client went away ", conn.RemoteAddr())
-}
-
-func (s *Server) connectForward(c ssh.Channel, forwardInfo forwardMsg) {
-	ctx, cancelTimeout := context.WithTimeout(context.Background(), 25*time.Second)
-	conn, err := s.Dial(ctx, "tcp", forwardInfo.To())
-	cancelTimeout()
-	if err != nil {
-		logger.Printf("unable to dial %s: %s", forwardInfo.To(), err)
-		fmt.Fprintf(c.Stderr(), "unable to dial %s: %s", forwardInfo.To(), err)
-		c.Close()
-		return
-	}
-
-	// pass traffic in both directions - close channel when io.Copy returns
-	go func() {
-		io.Copy(conn, c)
-		c.Close()
-	}()
-	func() {
-		io.Copy(c, conn)
-		c.Close()
-	}()
 }
