@@ -3,8 +3,10 @@ Description=onionpass
 After=network.target
 
 [Service]
-ExecStart=/root/schttp -sshPort 22
+ExecStart=/onionpass -sshport 22
+Restart=always
 
+DynamicUser=yes
 Environment=ALL_PROXY=socks5://127.0.0.1:9050
 
 [Install]
