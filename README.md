@@ -4,7 +4,7 @@ onionpass is about the convenience of being able to access hidden ssh services b
 
 onionpass accepts any combination of username and password/key.
 
-onionpass.net will be available until it runs out of bandwidth or file descriptors - use at your risk.
+`onionpass.net` will be available until it runs out of bandwidth or file descriptors - use at your risk.
 
 Usage examples
 ```
