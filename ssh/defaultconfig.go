@@ -10,6 +10,17 @@ import (
 // RawPrivateKey could be set with ldflags on build time
 var RawPrivateKey string
 
+// Banner is the ssh message presented on every new connection
+var Banner = `
+Hello %s
+
+Onionpass accepts ssh forward connections to onion services.
+This trades privacy for convenience - Don't use it or maybe
+run your own: https://github.com/fasmide/onionpass
+
+Proceed at your own risk
+`
+
 // DefaultConfig generates a default ssh.ServerConfig
 func DefaultConfig() (*ssh.ServerConfig, error) {
 	config := &ssh.ServerConfig{
@@ -26,6 +37,9 @@ func DefaultConfig() (*ssh.ServerConfig, error) {
 					"pubkey-fp": ssh.FingerprintSHA256(pubKey),
 				},
 			}, nil
+		},
+		BannerCallback: func(c ssh.ConnMetadata) string {
+			return fmt.Sprintf(Banner, c.RemoteAddr())
 		},
 	}
 
