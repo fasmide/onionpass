@@ -3,7 +3,7 @@ Description=onionpass
 After=network.target
 
 [Service]
-ExecStart=/onionpass -sshport 22
+ExecStart=/onionpass -sshport 22 -httpport 80
 Restart=always
 
 DynamicUser=yes
